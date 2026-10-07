@@ -11,6 +11,8 @@ import time
 HERE = Path(__file__).resolve().parent
 PACKAGE = HERE.parent / 'reproducibility' if HERE.name == 'source' else HERE.parent
 OUT = PACKAGE / 'results/review_audit'
+DATA = PACKAGE / 'data'
+REFERENCE = None
 CACHE = PACKAGE / '.cache/review_audit'
 os.umask(0o077)
 CACHE.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -32,8 +34,8 @@ from models import numpy_prediction
 
 
 def read(name, data=False):
-    return pd.read_csv(PACKAGE / ('data' if data else 'results') / name,
-                       float_precision='round_trip')
+    root = DATA if data else REFERENCE
+    return None if root is None else pd.read_csv(root / name, float_precision='round_trip')
 
 
 def save(frame, name):
@@ -42,11 +44,11 @@ def save(frame, name):
 
 
 def load_biochar():
-    cfg = json.loads((PACKAGE / 'data/model_settings.json').read_text())['biochar']
+    cfg = json.loads((DATA / 'model_settings.json').read_text())['biochar']
     frame = read('biochar_records.csv', True)
     order = np.random.RandomState(cfg['split_seed']).permutation(len(frame))
     train, test = order[:cfg['training_records']], order[cfg['training_records']:]
-    with np.load(PACKAGE / 'data/biochar_weights.npz', allow_pickle=False) as f:
+    with np.load(DATA / 'biochar_weights.npz', allow_pickle=False) as f:
         weights = {k: f[k] for k in f.files}
     return cfg, frame, train, test, weights
 
@@ -67,7 +69,7 @@ def load_case(name):
         split = np.full(len(frame), 'test', dtype=object)
         split[train] = 'train'
     else:
-        cfg = json.loads((PACKAGE / 'data/model_settings.json').read_text())[name]
+        cfg = json.loads((DATA / 'model_settings.json').read_text())[name]
         frame = read('activated_carbon_records.csv', True)
         features, variable = cfg['features'], 'Dose (g/L)'
         bins = pd.qcut(frame[p.UPTAKE], q=29, labels=False, duplicates='drop')
@@ -90,7 +92,8 @@ def load_case(name):
     numerator = (contexts.Ci * contexts['Volume (L)']).to_numpy() if name == 'biochar' else contexts[p.C0].to_numpy()
     ceiling = numerator[:, None] / values[None, :]
     original = read('author_output_game_records.csv' if name == 'biochar' else 'activated_carbon_output_game_records.csv')
-    np.testing.assert_allclose(grid[cids[test], vids[test]], original.predicted_q_mg_g, rtol=1e-10, atol=1e-8)
+    if original is not None:
+        np.testing.assert_allclose(grid[cids[test], vids[test]], original.predicted_q_mg_g, rtol=1e-10, atol=1e-8)
     return dict(name=name, frame=frame, cfg=cfg, train=train, test=test, features=features,
                 variable=variable, pollutant=pollutant, balance=balance, split=split,
                 contexts=contexts, cids=cids, vids=vids, values=values, grid=grid, ceiling=ceiling)
@@ -248,8 +251,9 @@ def pair_checks(case):
     raw, members, fields = p.observed_pairs(frame)
     pairs = pd.DataFrame(raw)
     original = read('activated_carbon_dose_pairs_records.csv')
-    np.testing.assert_allclose(pairs.observed_q_delta_mg_g, original.observed_q_delta_mg_g)
-    np.testing.assert_allclose(pairs.observed_removal_delta_percentage_points, original.observed_removal_delta_percentage_points)
+    if original is not None:
+        np.testing.assert_allclose(pairs.observed_q_delta_mg_g, original.observed_q_delta_mg_g)
+        np.testing.assert_allclose(pairs.observed_removal_delta_percentage_points, original.observed_removal_delta_percentage_points)
     pairs['dose_ratio'] = pairs.high_dose_g_l / pairs.low_dose_g_l
     pairs['q_ratio'] = pairs.high_observed_q_mg_g / pairs.low_observed_q_mg_g
     np.testing.assert_allclose(pairs.high_observed_removal_percent / pairs.low_observed_removal_percent,
@@ -302,11 +306,15 @@ def pair_checks(case):
 
 
 def high_removal(case):
-    records = read('author_treatment_records.csv')
-    records = records[records.method.eq('original_checkpoint')].copy().reset_index(drop=True)
-    assert len(records) == 456 and records.source_excel_row.is_unique
-    ids = records.source_excel_row.to_numpy(int)-2
+    ids = case['test']
     frame = case['frame'].iloc[ids].reset_index(drop=True)
+    observed = frame.Ci - frame['loading (g)'] * frame['qe'] / frame['Volume (L)']
+    prediction = case['grid'][case['cids'][ids], case['vids'][ids]]
+    records = p.balance_fields(frame.Ci, observed, frame['loading (g)'],
+                               frame['Volume (L)'], frame['qe'], prediction)
+    records['source_excel_row'] = ids + 2
+    records['method'] = 'original_checkpoint'
+    assert len(records) == 456 and records.source_excel_row.is_unique
     records['material_label'] = frame.Adsorbent
     records['pollutant'] = frame.inorganics
     selected = records[records.physical_observation & records.observed_removal_fraction.ge(.9)].copy()
@@ -352,9 +360,11 @@ def query_support():
             endpoints.append(dict(source_excel_row=index+2, dose_g_l=dose,
                                   target_ct_mg_l=target, **result))
     solved = pd.DataFrame(endpoints).sort_values(['target_ct_mg_l', 'dose_g_l']).reset_index(drop=True)
-    old = read('author_query_endpoints.csv').sort_values(['target_ct_mg_l', 'dose_g_l']).reset_index(drop=True)
-    np.testing.assert_allclose(solved[['c0_mg_l', 'predicted_q_mg_g']],
-                               old[['c0_mg_l', 'predicted_q_mg_g']], atol=1e-7, rtol=1e-9)
+    old = read('author_query_endpoints.csv')
+    if old is not None:
+        old = old.sort_values(['target_ct_mg_l', 'dose_g_l']).reset_index(drop=True)
+        np.testing.assert_allclose(solved[['c0_mg_l', 'predicted_q_mg_g']],
+                                   old[['c0_mg_l', 'predicted_q_mg_g']], atol=1e-7, rtol=1e-9)
     save(pd.DataFrame(support), 'query_local_support.csv')
     save(pd.concat(states, ignore_index=True), 'query_scan.csv')
     save(solved, 'query_roots.csv')
@@ -398,11 +408,26 @@ def monte_carlo_one(query_order):
                 estimate=float(result[result.permutation_draws.eq(8192)].estimate.mean()))
 
 
+def worker_paths(data, output):
+    global DATA, OUT
+    DATA, OUT = Path(data), Path(output)
+
+
 def main():
+    global DATA, OUT, REFERENCE
     parser = argparse.ArgumentParser()
     parser.add_argument('--workers', type=int, default=1)
     parser.add_argument('--skip-sampling', action='store_true')
+    parser.add_argument('--data-dir', type=Path, default=DATA)
+    parser.add_argument('--output', type=Path, default=OUT)
+    parser.add_argument('--reference-dir', type=Path,
+                        help='Optional reference results, used only for numerical comparisons')
     args = parser.parse_args()
+    DATA, OUT, REFERENCE = args.data_dir, args.output, args.reference_dir
+    if args.workers < 1:
+        parser.error('--workers must be positive')
+    if OUT.exists() and any(OUT.iterdir()):
+        parser.error(f'Output directory must be empty: {OUT}')
     started = time.monotonic()
     OUT.mkdir(parents=True, exist_ok=True)
     bio, carbon = load_case('biochar'), load_case('activated_carbon')
@@ -410,18 +435,14 @@ def main():
                'pairs': pair_checks(carbon), 'high_removal': high_removal(bio),
                'query_support': query_support()}
     if not args.skip_sampling:
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        with ProcessPoolExecutor(max_workers=args.workers, initializer=worker_paths,
+                                 initargs=(DATA, OUT)) as pool:
             summary['near_zero_sampling'] = list(pool.map(monte_carlo_one, range(12)))
         combined = pd.concat([pd.read_csv(OUT/f'near_zero_sampling_{i:02d}.csv') for i in range(12)], ignore_index=True)
         save(combined, 'near_zero_sampling.csv')
-    elif (OUT/'near_zero_sampling.csv').exists():
-        combined = pd.read_csv(OUT/'near_zero_sampling.csv')
-        final = combined[combined.permutation_draws.eq(8192)]
-        assert len(final) == 48 and final.query_order.nunique() == 12
-        summary['near_zero_sampling'] = final.groupby(
-            ['query_order', 'source_excel_row', 'saved_phi'], as_index=False
-        ).estimate.mean().to_dict('records')
-        summary['sampling_reused'] = True
+    summary['near_zero_sampling_completed'] = not args.skip_sampling
+    summary['saved_results_used_as_inputs'] = False
+    summary['precision_basis'] = 'Fresh NumPy replay of unchanged biochar weights'
     summary['elapsed_seconds'] = time.monotonic() - started
     summary['sign_tolerance'] = 'absolute 1e-8 in each response unit; source counts checked separately'
     (OUT/'summary.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n')

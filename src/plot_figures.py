@@ -90,6 +90,8 @@ def model_handles():
 
 
 def save(fig, name):
+    # Documents embed these figures at six inches; preserve an 8-point minimum.
+    minimum_font = 8.0 * fig.get_figwidth() / 6.0
     # Bounds are explicit; masking is unnecessary and makes Illustrator editing harder.
     for item in fig.findobj():
         if hasattr(item, 'set_clip_on'):
@@ -99,6 +101,7 @@ def save(fig, name):
     # Repeat after tick materialization so labels retain proper font glyphs.
     for _ in range(2):
         for item in fig.findobj(matplotlib.text.Text):
+            item.set_fontsize(max(item.get_fontsize(), minimum_font))
             value = item.get_text().replace('mg L⁻¹', 'mg/L').replace('mg g⁻¹', 'mg/g').replace('⁻¹', '$^{-1}$')
             for before, after in [('C₀', 'C$_0$'), ('Cₑ', 'C$_e$'), ('Cₜ', 'C$_t$'), ('R²', '$R^2$')]:
                 value = value.replace(before, after)
@@ -144,6 +147,7 @@ def save(fig, name):
                           'svg_clip_or_mask_constructs': 0,
                           'out_of_canvas_text': outside,
                           'size_inches': list(fig.get_size_inches()),
+                          'minimum_text_pt_at_six_inches': minimum_font * 6 / fig.get_figwidth(),
                           'exports': ['png', 'pdf', 'svg']}
     fig.savefig(CACHE / f'{name}_preview.png', dpi=140)
     plt.close(fig)
@@ -266,7 +270,8 @@ def main_two(paths, queries, controls):
     axes[1].text(.04, .95, 'Cₑ = 30 mg L⁻¹', transform=axes[1].transAxes,
                  va='top', fontsize=9.8)
     legend(axes[1], [Line2D([], [], color=c, lw=1.7) for _, c, _ in cases],
-           [label for _, _, label in cases], loc='lower left', fontsize=9.8)
+           [label for _, _, label in cases], loc='lower left', fontsize=9.8,
+           title='At fixed Cₑ', title_fontsize=9.8)
     ax = axes[2]
     selected = controls[controls.dose_g_l.eq(2)].sort_values('alpha_l_g')
     assert len(selected) == 6 and selected.dose_phi.lt(0).all()
@@ -305,7 +310,7 @@ def main_three(pairs, records):
     ax.set_ylim(yv.min()-8, yv.max()+42)
     ax.set_xlabel('Uptake change (%)')
     ax.set_ylabel('Removal change\n(percentage points)')
-    ax.set_title('Recorded dose\nchanges', pad=13)
+    ax.set_title('Activated carbon:\ndose changes', pad=13)
     legend(ax, [Line2D([], [], color=c, marker='o', ls='', markersize=4) for c in colors],
            labels, loc='upper left', fontsize=8.6)
     ax = axes[1]
@@ -318,7 +323,7 @@ def main_three(pairs, records):
     identity(ax, 0, hi)
     ax.axhline(0, color=GRAY, linewidth=.8, linestyle=':')
     ax.set_xlim(-.04, hi); ax.set_ylim(lo, hi * 1.3)
-    ax.set_title('Residual\nconcentration', pad=13)
+    ax.set_title('Biochar:\nresidual concentration', pad=13, fontsize=10.2)
     ax.set_xlabel('Reference Cₜ (mg L⁻¹)'); ax.set_ylabel('Predicted Cₜ (mg L⁻¹)')
     legend(ax, model_handles(), ['Model', 'Ceiling'],
            loc='upper left', fontsize=9.8)
@@ -338,7 +343,7 @@ def main_three(pairs, records):
     ax.set_yscale('log'); ax.set_ylim(min(qerr.min(), cerr.min()) / 2,
                                     max(qerr.max(), cerr.max()) * 7)
     ax.set_xlim(-.38, 1.38); ax.set_xticks([0, 1], ['Uptake q', 'Residual\nC$_t$'])
-    ax.set_title('Paired prediction\nerrors', pad=13)
+    ax.set_title('Biochar:\npaired errors', pad=13)
     ax.set_ylabel('Absolute relative error (%)')
     save(fig, 'Figure3')
 
@@ -463,18 +468,18 @@ def supplement_two(original_queries):
     dose = p.dose_g_l.to_numpy()
     axes[0].plot(dose, p.observed_q_mg_g, color=DARK, marker='o', lw=1.7)
     axes[0].plot(dose, p.predicted_q_mg_g, color=BLUE, marker='s', lw=1.7)
-    axes[0].set_ylabel('Uptake (mg g⁻¹)'); axes[0].set_ylim(.7, 2.8)
+    axes[0].set_ylabel('Uptake (mg g⁻¹)'); axes[0].set_ylim(.7, 3.4)
     legend(axes[0], [Line2D([], [], color=DARK, marker='o'),
                      Line2D([], [], color=BLUE, marker='s')],
-           ['Observed', 'Original model'], loc='lower left')
+           ['Observed', 'Model'], loc='upper left')
     axes[1].plot(dose, 100 * dose * p.observed_q_mg_g / 10,
                  color=DARK, marker='o', lw=1.7)
     axes[1].plot(dose, 100 * dose * p.predicted_q_mg_g / 10,
                  color=BLUE, marker='s', lw=1.7)
-    axes[1].set_ylabel('Removal (%)'); axes[1].set_ylim(10, 40)
+    axes[1].set_ylabel('Removal (%)'); axes[1].set_ylim(10, 48)
     legend(axes[1], [Line2D([], [], color=DARK, marker='o'),
                      Line2D([], [], color=BLUE, marker='s')],
-           ['Observed', 'Original model'], loc='upper left')
+           ['Observed', 'Model'], loc='upper left')
     for ax, title in zip(axes, ['Uptake per gram', 'Removal (%)']):
         ax.set_title(title, pad=13); ax.set_xlabel('Dose (g L⁻¹)')
         ax.set_xticks([1, 2]); ax.set_xlim(.85, 2.15)
@@ -509,7 +514,7 @@ def supplement_three(q):
     ax.set_xticks(range(len(targets)), [str(int(t)) for t in targets])
     ax.set_yticks(range(len(alphas)), [f'{a:g}' for a in alphas])
     ax.set_xlim(-.5, 3.5); ax.set_ylim(-.5, 5.5)
-    ax.set_title('Roots within tested range', pad=13)
+    ax.set_title('Both roots in range', pad=13)
     ax.set_xlabel('Target Cₑ (mg/L)'); ax.set_ylabel('α (L g⁻¹)')
     ax = axes[1]
     s = q[q.target_ce_mg_l.eq(30)]
@@ -567,7 +572,7 @@ def supplement_five():
         ax.set_ylabel('Uptake (mg g⁻¹)'); ax.set_xlim(-12, 690); ax.set_ylim(-8, 255)
         legend(ax, [Line2D([], [], color=co, marker=ma, markerfacecolor='white', ls='none')
                     for co, ma in zip(colors, markers)],
-               [f'{v} g L⁻¹' for v in [1, 2, 4, 8]], loc='upper left', ncol=2,
+               [f'{v} g L⁻¹' for v in [1, 2, 4, 8]], loc='upper right', ncol=2,
                columnspacing=.8, fontsize=9.8)
     save(fig, 'FigureS4')
 
@@ -582,7 +587,7 @@ def supplement_six(r):
                color=RED, s=14, alpha=.65, linewidths=0)
     ax.set_yscale('symlog', linthresh=1)
     ax.set_xlim(-2, 102); ax.set_xlabel('Record-derived removal (%)')
-    ax.set_ylabel('Absolute relative error (%)'); ax.set_title('All physical observations', pad=13)
+    ax.set_ylabel('Absolute relative error (%)'); ax.set_title('Records within mass-balance bounds', pad=13, fontsize=10.2)
     legend(ax, [Line2D([], [], color=BLUE, marker='o', ls='none'),
                 Line2D([], [], color=RED, marker='o', ls='none')],
            ['Uptake', 'Residual concentration'], loc='upper left', fontsize=9.8)

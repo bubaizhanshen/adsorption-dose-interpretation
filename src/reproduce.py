@@ -7,6 +7,8 @@ import os
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+DATA_ROOT = ROOT / 'data'
+REFERENCE_ROOT = None
 os.umask(0o077)
 CACHE = ROOT / '.cache'
 CACHE.mkdir(mode=0o700, exist_ok=True)
@@ -28,7 +30,10 @@ import physics as p
 
 
 def read(name, inputs=False):
-    return pd.read_csv(ROOT / ('data' if inputs else 'results') / name, float_precision='round_trip')
+    folder = DATA_ROOT if inputs else REFERENCE_ROOT
+    if folder is None:
+        return None
+    return pd.read_csv(folder / name, float_precision='round_trip')
 
 
 def predict(frame, cfg, weights):
@@ -50,15 +55,19 @@ def biochar(settings, output):
     order = np.random.RandomState(cfg['split_seed']).permutation(len(frame))
     cut = int(len(frame) * (1 - cfg['test_fraction']))
     train, test = order[:cut], order[cut:]
-    with np.load(ROOT / 'data/biochar_weights.npz', allow_pickle=False) as archive:
+    with np.load(DATA_ROOT / 'biochar_weights.npz', allow_pickle=False) as archive:
         weights = {key: archive[key] for key in archive.files}
     predicted = predict(frame, cfg, weights)
-    expected = read('author_checkpoint_predictions.csv').set_index('source_excel_row')
-    check(np.log(predicted), expected.loc[frame.index + 2, 'numpy_predicted_log_q'], atol=1e-11)
-    framework_log = expected.loc[frame.index + 2, 'predicted_log_q'].to_numpy()
-    framework_q = expected.loc[frame.index + 2, 'predicted_q_mg_g'].to_numpy()
-    framework_difference = float(np.max(np.abs(np.log(predicted) - framework_log)))
-    assert framework_difference < 1e-4
+    expected = read('author_checkpoint_predictions.csv')
+    framework_difference = None
+    if expected is not None:
+        expected = expected.set_index('source_excel_row')
+        check(np.log(predicted), expected.loc[frame.index + 2, 'numpy_predicted_log_q'], atol=1e-11)
+        framework_log = expected.loc[frame.index + 2, 'predicted_log_q'].to_numpy()
+        framework_difference = float(np.max(np.abs(np.log(predicted) - framework_log)))
+        assert framework_difference < 1e-4
+    save(pd.DataFrame({'source_excel_row': frame.index + 2, 'predicted_log_q': np.log(predicted),
+                       'predicted_q_mg_g': predicted}), output, 'biochar_predictions.csv')
     features = cfg['numeric_features'] + cfg['categorical_features']
     fields = [name for name in features if name != 'loading (g)']
     tuples = [tuple(row) for row in frame[fields].to_numpy()]
@@ -78,15 +87,20 @@ def biochar(settings, output):
     game = {name: p.grouped_contributions(grid, frequency, contexts_index[test], mass_index[test])
             for name, grid in [('uptake', q_grid), ('removal', removal)]}
     original = read('author_output_game_records.csv')
-    for name, column in [('uptake', 'uptake_loading_phi_mg_g'), ('removal', 'removal_loading_phi_percentage_points')]:
-        check(game[name]['mass_phi'], original[column])
+    if original is not None:
+        for name, column in [('uptake', 'uptake_loading_phi_mg_g'), ('removal', 'removal_loading_phi_percentage_points')]:
+            check(game[name]['mass_phi'], original[column])
     changed = p.sign(game['uptake']['mass_phi']) != p.sign(game['removal']['mass_phi'])
     saved_shap = read('biochar_saved_shap.csv', inputs=True)
     active = ['Ci', 'Volume (L)', 'loading (g)']
     ceiling_phi, _ = p.exact_attributions(frame.iloc[train][active].to_numpy(), frame.iloc[test][active].to_numpy())
     ceiling_expected = read('author_balance_attribution_records.csv')
-    for index, field in enumerate(active):
-        check(ceiling_phi[:, index], ceiling_expected['ceiling_exact_shap:' + field])
+    if ceiling_expected is not None:
+        for index, field in enumerate(active):
+            check(ceiling_phi[:, index], ceiling_expected['ceiling_exact_shap:' + field])
+    save(pd.DataFrame({'source_excel_row': test + 2, **{
+        'ceiling_exact_shap:' + field: ceiling_phi[:, i] for i, field in enumerate(active)}}),
+        output, 'biochar_ceiling_attributions.csv')
     signs_equal = np.sign(ceiling_phi[:, 2]) == np.sign(saved_shap['loading (g)'])
     solute_mass = (contexts.Ci * contexts['Volume (L)']).to_numpy()
     log_q, log_r, normalizer = p.log_outputs(q_grid, solute_mass, masses)
@@ -95,11 +109,18 @@ def biochar(settings, output):
     check(log_games[0]['mass_phi'], log_games[1]['mass_phi'] + log_games[2]['mass_phi'], atol=1e-11)
     check(log_games[2]['mass_phi'], p.analytic_mass_normalizer(masses, frequency, mass_index[test]), atol=1e-11)
     log_expected = read('author_log_balance_records.csv')
-    check(log_games[1]['mass_phi'], log_expected.log_removal_loading_contribution)
+    if log_expected is not None:
+        check(log_games[1]['mass_phi'], log_expected.log_removal_loading_contribution)
+    save(pd.DataFrame({'source_excel_row': test + 2,
+                       'log_uptake_phi': log_games[0]['mass_phi'],
+                       'log_removal_phi': log_games[1]['mass_phi'],
+                       'log_ceiling_phi': log_games[2]['mass_phi']}), output, 'biochar_log_attributions.csv')
     selected = frame.iloc[test]
     treatment = p.balance_fields(selected.Ci, selected.Cf, selected['loading (g)'],
-                                 selected['Volume (L)'], selected.qe, framework_q[test])
-    treatment['predicted_log_q'] = framework_log[test]
+                                 selected['Volume (L)'], selected.qe, predicted[test])
+    treatment['predicted_log_q'] = np.log(predicted[test])
+    treatment['source_excel_row'] = test + 2
+    save(treatment, output, 'biochar_treatment_records.csv')
     subsets = [('all_original_test_records', treatment),
                ('physical_observations', treatment[treatment.physical_observation])]
     subsets += [(f'observed_removal_ge_{int(100 * threshold)}pct',
@@ -107,12 +128,18 @@ def biochar(settings, output):
                 for threshold in (.9, .95, .99)]
     precision = pd.DataFrame([p.summary(group, 'original_checkpoint', name) for name, group in subsets])
     reference_precision = read('author_treatment_summary.csv')
-    for _, row in precision.iterrows():
-        expected_row = reference_precision[(reference_precision.method == 'original_checkpoint')
-                                           & (reference_precision.population == row.population)].iloc[0]
-        for column in ('records', 'q_r2', 'ct_r2', 'ct_mae_mg_l', 'median_q_relative_error_percent',
-                       'median_ct_relative_error_percent', 'nonphysical_ct_predictions'):
-            check(row[column], expected_row[column], atol=1e-7)
+    if reference_precision is not None:
+        differences = []
+        for _, row in precision.iterrows():
+            expected_row = reference_precision[(reference_precision.method == 'original_checkpoint')
+                                               & (reference_precision.population == row.population)].iloc[0]
+            for column in ('records', 'q_r2', 'ct_r2', 'ct_mae_mg_l', 'median_q_relative_error_percent',
+                           'median_ct_relative_error_percent', 'nonphysical_ct_predictions'):
+                differences.append({'population': row.population, 'metric': column,
+                                    'recomputed': row[column], 'reference': expected_row[column],
+                                    'absolute_difference': abs(row[column] - expected_row[column])})
+                check(row[column], expected_row[column], atol=1e-3, rtol=1e-5)
+        save(pd.DataFrame(differences), output, 'biochar_framework_precision_comparison.csv')
     save(precision, output, 'biochar_precision.csv')
     save(pd.DataFrame({'source_excel_row': test + 2, 'model_q': predicted[test],
                        'model_uptake_phi': game['uptake']['mass_phi'],
@@ -134,18 +161,18 @@ def biochar(settings, output):
                                   target_ct_mg_l=target, **result))
     endpoint_frame = pd.DataFrame(endpoints)
     prior_endpoints = read('author_query_endpoints.csv')
-    for _, row in endpoint_frame.iterrows():
-        match = prior_endpoints[np.isclose(prior_endpoints.loading_g, row.loading_g)
-                                & np.isclose(prior_endpoints.target_ct_mg_l, row.target_ct_mg_l)].iloc[0]
-        check(row.c0_mg_l, match.c0_mg_l, atol=1e-7)
-        check(row.predicted_q_mg_g, match.predicted_q_mg_g, atol=1e-7)
-        assert row.status == match.status
+    if prior_endpoints is not None:
+        for _, row in endpoint_frame.iterrows():
+            match = prior_endpoints[np.isclose(prior_endpoints.loading_g, row.loading_g)
+                                    & np.isclose(prior_endpoints.target_ct_mg_l, row.target_ct_mg_l)].iloc[0]
+            check(row.c0_mg_l, match.c0_mg_l, atol=1e-7)
+            check(row.predicted_q_mg_g, match.predicted_q_mg_g, atol=1e-7)
+            assert row.status == match.status
     save(endpoint_frame, output, 'biochar_common_concentration_queries.csv')
     return {'source_records': len(frame), 'training_records': len(train), 'test_records': len(test),
             'uptake_r2': float(r2_score(selected.qe, predicted[test])),
-            'source_framework_uptake_r2': float(r2_score(selected.qe, framework_q[test])),
             'numpy_vs_source_framework_maximum_log_difference': framework_difference,
-            'precision_statistics_basis': 'Retained source-framework predictions; the independent NumPy replay is checked separately',
+            'precision_statistics_basis': 'Fresh NumPy inference from the released trained weights; saved reference predictions are comparison-only',
             'reference_sign_agreement': int(signs_equal.sum()), 'output_sign_changes': int(changed.sum()),
             'negative_log_uptake_positive_log_removal': int(((p.sign(log_games[0]['mass_phi']) == -1)
                                                            & (p.sign(log_games[1]['mass_phi']) == 1)).sum()),
@@ -163,7 +190,8 @@ def carbon(settings, output):
     model = make_pipeline(StandardScaler(), GradientBoostingRegressor(**cfg['parameters']))
     model.fit(x[train], y[train]); predicted = model.predict(x)
     expected = read('activated_carbon_output_game_records.csv')
-    check(predicted[test], expected.predicted_q_mg_g, atol=1e-8)
+    if expected is not None:
+        check(predicted[test], expected.predicted_q_mg_g, atol=1e-8)
     contexts, context_ids = np.unique(x[:, 1:], axis=0, return_inverse=True)
     doses, dose_ids = np.unique(x[:, 0], return_inverse=True)
     frequency = np.zeros((len(contexts), len(doses)))
@@ -176,22 +204,26 @@ def carbon(settings, output):
     removal = 100 * grid * doses[None, :] / contexts[:, 0, None]
     game = {name: p.grouped_contributions(values, frequency, context_ids[test], dose_ids[test])
             for name, values in [('uptake', grid), ('removal', removal)]}
-    check(game['uptake']['mass_phi'], expected.uptake_dose_phi_mg_g)
-    check(game['removal']['mass_phi'], expected.removal_dose_phi_percentage_points)
+    if expected is not None:
+        check(game['uptake']['mass_phi'], expected.uptake_dose_phi_mg_g)
+        check(game['removal']['mass_phi'], expected.removal_dose_phi_percentage_points)
     coalitions = p.analytic_coalitions(x[test, 0], x[test, 1], x[train, 0], x[train, 1])
     reference = read('activated_carbon_reference_records.csv')
     scores = {}
     for name, values in coalitions.items():
         phi, _ = p.contributions(values)
-        check(phi, reference[name + '_dose_phi_mg_g'])
+        if reference is not None:
+            check(phi, reference[name + '_dose_phi_mg_g'])
         scores[name] = {'r2': float(r2_score(y[test], values[:, -1])),
                         'sign_agreement': int((p.sign(phi) == p.sign(game['uptake']['mass_phi'])).sum())}
     pairs, members, fields = p.observed_pairs(frame)
     comparisons = pd.DataFrame(pairs); prior = read('activated_carbon_dose_pairs_records.csv')
-    assert len(fields) == 18 and len(comparisons) == len(prior)
-    for field in ('low_observed_q_mg_g', 'high_observed_q_mg_g', 'observed_q_direction',
-                  'observed_removal_direction', 'observed_removal_delta_percentage_points'):
-        check(comparisons[field], prior[field])
+    assert len(fields) == 18
+    if prior is not None:
+        assert len(comparisons) == len(prior)
+        for field in ('low_observed_q_mg_g', 'high_observed_q_mg_g', 'observed_q_direction',
+                      'observed_removal_direction', 'observed_removal_delta_percentage_points'):
+            check(comparisons[field], prior[field])
     save(comparisons, output, 'activated_carbon_dose_pairs.csv')
     save(pd.DataFrame({'source_excel_row': test + 2, 'observed_q': y[test], 'model_q': predicted[test],
                        'uptake_dose_phi': game['uptake']['mass_phi'], 'removal_dose_phi': game['removal']['mass_phi']}),
@@ -228,13 +260,18 @@ def controls(output):
 
 
 def main():
+    global DATA_ROOT, REFERENCE_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir', type=Path, default=DATA_ROOT)
+    parser.add_argument('--reference-dir', type=Path, help='Optional old results, used for comparison only')
     parser.add_argument('--output', type=Path, default=ROOT / 'reproduced')
     args = parser.parse_args(); output = args.output.resolve()
+    DATA_ROOT = args.data_dir.resolve()
+    REFERENCE_ROOT = args.reference_dir.resolve() if args.reference_dir else None
     if output.exists() and any(output.iterdir()):
         raise FileExistsError('Choose an empty output directory; saved outputs are never overwritten.')
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
-    settings = json.loads((ROOT / 'data/model_settings.json').read_text())
+    settings = json.loads((DATA_ROOT / 'model_settings.json').read_text())
     started = time.monotonic()
     print('Replaying the released biochar checkpoint and its fixed-background comparisons...', flush=True)
     report = {'biochar': biochar(settings, output)}
@@ -242,8 +279,8 @@ def main():
     report['activated_carbon'] = carbon(settings, output)
     report['controls'] = controls(output)
     report['elapsed_seconds'] = time.monotonic() - started
-    report['reference_comparisons_passed'] = True
-    report['scope'] = 'Primary model calculations, source comparisons, and six equilibrium controls; supplementary saved results are supplied separately.'
+    report['reference_comparisons_passed'] = True if REFERENCE_ROOT else None
+    report['scope'] = 'Fresh primary calculations and six equilibrium controls; no saved results are used as computational inputs.'
     (output / 'reproduction_report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2), flush=True)
 

@@ -1,4 +1,5 @@
 """Recompute graphical bounds and supplied controls from portable inputs."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,9 @@ import sys
 
 os.umask(0o077)
 HERE = Path(__file__).resolve().parent
-PACKAGE = HERE.parent if (HERE.parent / 'data/model_settings.json').exists() else HERE.parent / 'reproducibility'
+PACKAGE = HERE.parent
+os.environ.setdefault('TMPDIR', str(PACKAGE / '.cache'))
+(PACKAGE / '.cache').mkdir(mode=0o700, exist_ok=True)
 sys.path.insert(0, str(PACKAGE / 'src'))
 import numpy as np
 import pandas as pd
@@ -44,9 +47,11 @@ def graphical(data, saved, output):
         rows.append(dict(**row, ce_mg_l=float(scale(x, 'x')), q_mg_g=float(scale(y, 'y')),
                          ce_low=xl, ce_high=xu, q_low=yl, q_high=yu, visible_q_low=vl, visible_q_high=vu))
     markers = pd.DataFrame(rows)
-    old_markers = pd.read_csv(saved / 'real_concave_profiles/zhao_full_markers.csv')
-    marker_error = compare_columns(markers, old_markers, ['ce_mg_l', 'q_mg_g', 'ce_low', 'ce_high',
-                                   'q_low', 'q_high', 'visible_q_low', 'visible_q_high'])
+    marker_error = None
+    if saved is not None:
+        old_markers = pd.read_csv(saved / 'real_concave_profiles/zhao_full_markers.csv')
+        marker_error = compare_columns(markers, old_markers, ['ce_mg_l', 'q_mg_g', 'ce_low', 'ce_high',
+                                       'q_low', 'q_high', 'visible_q_low', 'visible_q_high'])
     markers.to_csv(output / 'zhao_markers.csv', index=False)
     families = {}
     for envelope in ('reading', 'visible_vertical_extent'):
@@ -76,10 +81,12 @@ def graphical(data, saved, output):
                 checks.append(dict(closure=result['closure_error'], balance=result['balance_error'],
                                    violation=a.bound_violation(bounds, result)))
     current = pd.DataFrame(rows)
-    old = pd.read_csv(saved / 'real_concave_profiles/monotone_mediator_summary.csv')
-    assert current.status.tolist() == old.status.tolist()
-    columns = [c for c in current if c.endswith(('_lower', '_upper'))]
-    bound_error = compare_columns(current, old, columns)
+    bound_error = None
+    if saved is not None:
+        old = pd.read_csv(saved / 'real_concave_profiles/monotone_mediator_summary.csv')
+        assert current.status.tolist() == old.status.tolist()
+        columns = [c for c in current if c.endswith(('_lower', '_upper'))]
+        bound_error = compare_columns(current, old, columns)
     witness = pd.DataFrame(checks)
     assert witness.to_numpy().max() < 1e-7
     current.to_csv(output / 'zhao_outer_bounds.csv', index=False)
@@ -90,20 +97,25 @@ def graphical(data, saved, output):
 
 
 def kinetic(saved, output):
-    original = pd.read_csv(saved / 'real_concave_profiles/kinetic_shared_observations.csv')
     rows = []
-    for case, group in original.groupby('case', sort=False):
-        c0, dose = group.c0_mg_l.to_numpy(), group.dose_g_l.to_numpy()
-        if case == 'equilibrium_limit':
+    # Text S5 specifies this full factorial grid; no saved outcomes define it.
+    c0 = np.repeat(np.geomspace(1., 100., 11), 11)
+    dose = np.tile(np.geomspace(.01, 10., 11), 11)
+    for kt in (.01, .1, 1., 10., 100., None):
+        case = 'equilibrium_limit' if kt is None else f'kt_{kt:g}'
+        if kt is None:
             ct = c0 / (1 + a.HENRY_K * dose)
             q = a.HENRY_K * ct
         else:
-            state = a.kinetic_state(c0, dose, float(case.removeprefix('kt_')) / a.LDF_K)
+            state = a.kinetic_state(c0, dose, kt / a.LDF_K)
             ct, q = state['ct'], state['q']
         rows.extend(dict(case=case, c0_mg_l=c, dose_g_l=d, ct_mg_l=t, q_mg_g=u)
                     for c, d, t, u in zip(c0, dose, ct, q))
     observations = pd.DataFrame(rows)
-    error = compare_columns(observations, original, ['c0_mg_l', 'dose_g_l', 'ct_mg_l', 'q_mg_g'])
+    error = None
+    if saved is not None:
+        original = pd.read_csv(saved / 'real_concave_profiles/kinetic_shared_observations.csv')
+        error = compare_columns(observations, original, ['c0_mg_l', 'dose_g_l', 'ct_mg_l', 'q_mg_g'])
     pairs, ode_error = [], 0.0
     for kt in (.01, .1, 1., 10., 100.):
         time = kt / a.LDF_K
@@ -119,7 +131,9 @@ def kinetic(saved, output):
             numerical = a.independent_ode(100., d, time)
             ode_error = max(ode_error, float(np.max(np.abs(numerical - [state['ct'][i], state['q'][i]]))))
     pairs = pd.DataFrame(pairs)
-    pair_error = compare_columns(pairs, pd.read_csv(saved / 'real_concave_profiles/kinetic_shared_pairs.csv'), list(pairs))
+    pair_error = None
+    if saved is not None:
+        pair_error = compare_columns(pairs, pd.read_csv(saved / 'real_concave_profiles/kinetic_shared_pairs.csv'), list(pairs))
     assert ode_error < 1e-7
     observations.to_csv(output / 'kinetic_observations.csv', index=False)
     pairs.to_csv(output / 'kinetic_pairs.csv', index=False)
@@ -144,18 +158,29 @@ def competition(saved, output):
                              operating_qa_change_percent=100*(high.qa_mmol_g/low.qa_mmol_g-1),
                              common_a_qa_change_percent=100*(states[1].qa_mmol_g/states[0].qa_mmol_g-1)))
     current = pd.DataFrame(rows)
-    difference = compare_columns(current, pd.read_csv(saved / 'concave_equivalence/competitive_contrasts.csv'), list(current))
+    difference = None
+    if saved is not None:
+        difference = compare_columns(current, pd.read_csv(saved / 'concave_equivalence/competitive_contrasts.csv'), list(current))
     current.to_csv(output / 'competitive_contrasts.csv', index=False)
     assert max_error < 1e-10
     return dict(comparisons=len(current), saved_difference=difference, independent_query_error=max_error)
 
 
 def main():
-    data, saved = PACKAGE / 'data', PACKAGE / 'results'
-    output = saved / 'supplement_recomputed'
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir', type=Path, default=PACKAGE / 'data')
+    parser.add_argument('--reference-dir', type=Path,
+                        help='Optional saved results used only for numerical comparisons')
+    parser.add_argument('--output', type=Path, default=PACKAGE / 'results/supplement_recomputed')
+    args = parser.parse_args()
+    data, saved, output = args.data_dir, args.reference_dir, args.output
+    if output.exists() and any(output.iterdir()):
+        parser.error(f'Output directory must be empty: {output}')
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     summary = dict(graphical=graphical(data, saved, output), kinetic=kinetic(saved, output),
                    competition=competition(saved, output))
+    summary['reference_comparisons_requested'] = saved is not None
+    summary['saved_results_used_as_inputs'] = False
     (output / 'checks.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2))
 

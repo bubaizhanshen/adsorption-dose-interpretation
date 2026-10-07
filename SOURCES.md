@@ -14,8 +14,9 @@ The primary runner expects prepared `data/biochar_records.csv`,
 `data/biochar_saved_shap.csv`, `data/biochar_weights.npz`, and the biochar entry
 in `data/model_settings.json`. These files contain records, saved explanations,
 weights, numerical-feature names, category vocabularies, and split settings.
-They are excluded from this release. The acquisition and preprocessing are
-described in Supporting Information Texts S1 and S2. `models.py` is an
+They are excluded from this release. The preparation command below reconstructs
+them from the pinned source files; Supporting Information Texts S1 and S2 describe
+their use. `models.py` is an
 independent NumPy implementation of the inspected inference operations, not
 the source authors' framework or weights.
 
@@ -48,16 +49,58 @@ The supplementary runner expects `data/zhao_marker_pixels.csv`,
 These graphical readings are excluded along with the source image. Text S4
 describes the calibration, reading rectangles, and monotone outer bounds.
 
-## Numerical reference results
+## Preparing model inputs from the original files
 
-The empirical runners also load saved `results/` tables to check recalculated
-values. These include source-framework predictions, attribution grids,
-record-level comparisons, and the supplementary query registries. A source
-workbook alone is therefore insufficient to run all verification commands.
-The separately prepared numerical package is needed for those checks.
-No downloader or complete empirical-input reconstruction is claimed here.
+Obtain the files at the revisions above, preserving their repository paths.
+For biochar, the required files are `scripts/HMI_data.xlsx`, `scripts/utils.py`,
+`scripts/interpretation.py`, `scripts/results/figures/kernel_shap_ftt.csv`, and
+`config.json` and `weights/weights_110_0.08815.hdf5` within
+`scripts/results/ft_transformer_selected_inputs_log/`.
+For activated carbon, obtain `Dataset. S.Lamsiah.xlsx` and
+`HeavyMetalAdsorptionPredictor_S_Lamsiah.ipynb` at the repository root.
+The script checks each file against the inspected SHA-256 fingerprint before
+reading it. It does not execute the source Python or notebook.
+
+```bash
+python src/prepare_inputs.py \
+  --biochar-source /path/to/envai101 \
+  --activated-carbon-source /path/to/Heavy-Metal-Adsorption-Activated-Carbon-ML \
+  --output /path/to/new/prepared-data
+```
+
+The output directory must not already exist. Both workbooks use sheet index 0;
+no records are filtered or reordered in the prepared tables. Biochar column
+names and selected features are extracted from the verified source loader and
+interpretation script. Numerical fields are converted to floats, categorical
+fields to strings, and category order comes from the saved model configuration.
+The workbook already uses grams and liters for loading and volume; no additional
+unit conversion is applied. Activated-carbon columns retain their original names
+and units, including the newline in the total-pore-volume header.
+
+The biochar split is the seed-1000 permutation, with the first 70% training.
+Activated carbon uses the seed-42 stratified 70/15/15 split with 29 response
+quantiles; preprocessing is fitted later on training data only. A split registry
+records both zero-based input indices and Excel row numbers (index + 2).
+`preparation_report.json` contains column mappings, schemas, source fingerprints,
+and checksums of the prepared files. The model settings distinguish reuse of
+the biochar checkpoint from refitting activated carbon. This command prepares
+the two model datasets, not the separately digitized Zhao inputs.
+
+## Optional numerical reference results
+
+The empirical runners can compare their outputs with saved reference results
+when `--reference-dir` is supplied. Without that option they calculate from
+inputs only. Saved predictions and result tables do not supply numerical inputs
+to the primary, sensitivity, or supplementary computations. The graph-reading
+coordinates, calibration, and frozen query registry remain required inputs,
+distinct from reference outputs. There is no downloader.
+
+Biochar predictions are recomputed from unchanged weights using NumPy. This
+replay can differ slightly from the original TensorFlow implementation through
+floating-point arithmetic; it is not a new model fit. Archived source SHAP is
+retained for the historical-explanation comparison. Independently calculated
+two-group contributions and sampled near-zero checks are separate analyses.
 
 The code-only example and nine synthetic tests need none of these files.
 Redistribution rights for the third-party empirical inputs and weights have
 not been established, so they have not been uploaded.
-
